@@ -35,11 +35,6 @@ public class SimpleDynamoProvider extends ContentProvider {
     private static final String QUERY = "%QUERY%";
     private static final String RECOVERDB = "%RECOVERDB%";
     private static final String RECOVERREPLICA = "%RECOVERREPLICA%";
-    private static final String ASKREPLICA = "%ASKREPLICA%";
-
-
-
-    protected static final Uri PROVIDER_URI = Uri.parse("content://edu.buffalo.cse.cse486586.simpledynamo.provider");
 
     private final int NUMBER_OF_REPLICAS = 2;
     private final int serverPort = 10000;
@@ -87,13 +82,34 @@ public class SimpleDynamoProvider extends ContentProvider {
 
     @Override
 	public int delete(Uri uri, String selection, String[] selectionArgs) {
+
+        Log.i("*DELETE*", "deleting key="+selection);
+        String targetNode = getSuccessor(SHA1.genHash(selection));
+
+        switch (selection) {
+            case "*":
+                for(String nodeId: ports) {
+                    try {
+                        sendReceive(nodeId, DELETEALL + SEPARATOR + meHash, false);
+                    }
+                    catch (Exception e) {}
+                }
+
+            case "@":
+                targetNode = meHash;
+
+            default:
+                for(String nodeId: readMap(targetNode)) {
+                    try {
+                        sendReceive(nodeId, DELETE + SEPARATOR + selection + SEPARATOR + targetNode, false);
+                    }
+                    catch (Exception e) {}
+                }
+        }
+
 		return 0;
 	}
 
-	@Override
-	public String getType(Uri uri) {
-		return null;
-	}
 
 	@Override
 	public Uri insert(Uri uri, ContentValues values) {
@@ -112,7 +128,72 @@ public class SimpleDynamoProvider extends ContentProvider {
 	}
 
 	@Override
-	public boolean onCreate() {
+	public Cursor query(Uri uri, String[] projection, String selection,
+			String[] selectionArgs, String sortOrder) {
+
+
+        Log.i("*QUERY*", "querying key="+selection);
+        String targetNode = getSuccessor(SHA1.genHash(selection)), data=null;
+        switch (selection) {
+
+            case "*":
+                for(String nodeId: ports) {
+                    Log.i("*QUERY*", "Collecting emulator-"+nodeId+" data...");
+                    try {
+                        data += sendReceive(nodeId, QUERY + SEPARATOR + "*", true) + SEPARATOR;
+                    }
+                    catch (Exception e) {
+                        Log.i("*QUERY*", "Couldn't connect to emulator-"+nodeId);
+                    }
+                }
+                break;
+
+            case "@":
+                data = "";
+                for(String replica: DBOpener.REPLICAS) {
+                    data += getPairsAsString(replica, null, null) + SEPARATOR;
+                }
+                targetNode = meHash;
+
+            default:
+                for(String nodeId: readMap(targetNode)) {
+                    String temp;
+                    try {
+                        Log.i("*QUERY*", "Asking emulator-"+nodeId);
+                        temp = sendReceive(nodeId, QUERY + SEPARATOR + selection + SEPARATOR + targetNode, true);
+                        if (temp.length() == 0) continue;
+                        data = (data != null) ? data+temp : temp;
+                        break;
+                    }
+                    catch (Exception e) {
+                        Log.i("*QUERY*", "Couldn't connect to emulator-"+nodeId+", trying another node...");
+                    }
+                }
+        }
+        if (data == null) {
+            data = "";
+            Log.e("*QUERY*", "FAILED querying key="+selection);
+        }
+        MatrixCursor mc = new MatrixCursor(new String[] {DBOpener.COLUMN_NAME_KEY, DBOpener.COLUMN_NAME_MESSAGE});
+        for(String pair: data.split(SEPARATOR)) {
+            String[] keyValue = pair.split(SPLITTER);
+            if (keyValue.length != 2) continue;
+            Log.i("GOT", "key="+keyValue[0]+" value="+keyValue[1]);
+            mc.addRow(keyValue);
+        }
+        Log.i("TOTAL", " "+mc.getCount());
+
+        return mc;
+	}
+
+	@Override
+	public int update(Uri uri, ContentValues values, String selection,
+			String[] selectionArgs) {
+		return 0;
+	}
+
+    @Override
+    public boolean onCreate() {
         DBOpener dbOpener = new DBOpener(getContext());
         mDB = dbOpener.getWritableDatabase();
         // clean up storage
@@ -150,76 +231,16 @@ public class SimpleDynamoProvider extends ContentProvider {
         new RecoverReplicas().executeOnExecutor(AsyncTask.SERIAL_EXECUTOR);
 
         return !(mDB == null);
-	}
+    }
 
-	@Override
-	public Cursor query(Uri uri, String[] projection, String selection,
-			String[] selectionArgs, String sortOrder) {
-
-
-        Log.i("*QUERY*", "querying key="+selection);
-        String targetNode = getSuccessor(SHA1.genHash(selection)), data=null;
-        Cursor cursor;
-        switch (selection) {
-            case "*":
-                for(String nodeHash: indexing) {
-                    String messageFromNode = null;
-                    Log.i("*QUERY*", "Collecting emulator-"+hash2port.get(nodeHash)+" data...");
-                    for(String nodeId: readMap(nodeHash)) {
-                        try {
-                            messageFromNode = sendReceive(nodeId, QUERY + SEPARATOR + "@" + SEPARATOR + nodeHash, true);
-                            data += messageFromNode;
-                            break;
-                        }
-                        catch (Exception e) {
-                            Log.i("*QUERY*", "Couldn't connect to emulator-"+nodeId+", trying another node...");
-                        }
-                    }
-                    if(messageFromNode == null) {
-                        Log.e("*QUERY*", "Couldn't get data for emulator-"+hash2port.get(nodeHash));
-                    }
-                }
-                break;
-            case "@":
-                Log.i("*QUERY*", "Searching in replicas first...");
-                targetNode = meHash;
-            default:
-                for(String nodeId: readMap(targetNode)) {
-                    try {
-                        Log.i("*QUERY*", "Asking emulator-"+nodeId);
-                        data = sendReceive(nodeId, QUERY + SEPARATOR + selection + SEPARATOR + targetNode, true);
-                        break;
-                    }
-                    catch (Exception e) {
-                        Log.i("*QUERY*", "Couldn't connect to emulator-"+nodeId+", trying another node...");
-                    }
-                }
-        }
-        if (data == null) {
-            data = "";
-            Log.e("*QUERY*", "FAILED querying key="+selection);
-        }
-        MatrixCursor mc = new MatrixCursor(new String[] {DBOpener.COLUMN_NAME_KEY, DBOpener.COLUMN_NAME_MESSAGE});
-        for(String pair: data.split(SEPARATOR)) {
-            String[] keyValue = pair.split(SPLITTER);
-            if (keyValue.length != 2) continue;
-            Log.i("GOT", "key="+keyValue[0]+" value="+keyValue[1]);
-            mc.addRow(keyValue);
-        }
-        Log.i("TOTAL", " "+mc.getCount());
-
-        return mc;
-	}
-
-	@Override
-	public int update(Uri uri, ContentValues values, String selection,
-			String[] selectionArgs) {
-		return 0;
-	}
+    @Override
+    public String getType(Uri uri) {
+        return null;
+    }
 
 
     //***********************************************************************************
-    // DHT PROVIDER HELPERS
+    // DYNAMO PROVIDER HELPERS
     //***********************************************************************************
 
 
@@ -261,15 +282,11 @@ public class SimpleDynamoProvider extends ContentProvider {
         return (successor == null) ? lookUp.first() : successor;
     }
 
-    private boolean goesToMe(String key) {
-        return getSuccessor(SHA1.genHash(key)).compareTo(meHash) == 0;
-    }
-
     private String sendReceive(String toWhom, String message, boolean receive) throws Exception {
 
         Socket server = new Socket();
 
-        server.connect(new InetSocketAddress("10.0.2.2", Integer.parseInt(toWhom) * 2), 200);
+        server.connect(new InetSocketAddress("10.0.2.2", Integer.parseInt(toWhom) * 2), 300);
         PrintStream streamWriter = new PrintStream(server.getOutputStream(), true);
         BufferedReader streamReader = new BufferedReader( new InputStreamReader(server.getInputStream()));
         streamWriter.println(message);
@@ -364,7 +381,7 @@ public class SimpleDynamoProvider extends ContentProvider {
 
 
     //***********************************************************************************
-    // DHT PROVIDER CLASSES
+    // DYNAMO PROVIDER CLASSES
     //***********************************************************************************
 
 
@@ -444,7 +461,7 @@ public class SimpleDynamoProvider extends ContentProvider {
             Socket client = null;
             BufferedReader streamReader = null;
             PrintStream streamWriter = null;
-            String reply;
+            String reply = "";
             while (true) {
                 try {
                     // Set up connection
@@ -472,9 +489,23 @@ public class SimpleDynamoProvider extends ContentProvider {
                             break;
 
                         case DELETE:
+                            switch (message[1]) {
+
+                                case "@":
+                                    mDB.delete(findTable(message[2]), null, null);
+                                    break;
+
+                                default:
+                                    mDB.delete(findTable(message[2]), "key=?", new String[] {message[1]});
+                                    break;
+                            }
                             break;
 
                         case DELETEALL:
+                            mDB.delete(DBOpener.MAIN_TABLE, null, null);
+                            for(String replica: DBOpener.REPLICAS) {
+                                mDB.delete(replica, null, null);
+                            }
                             break;
 
                         case INSERT:
@@ -482,9 +513,24 @@ public class SimpleDynamoProvider extends ContentProvider {
                             break;
 
                         case QUERY:
-                            if (message[1].equals("*")) {
-                            }
-                            else {
+                            switch (message[1]) {
+
+                                case "*":
+                                    for(String replica: DBOpener.REPLICAS) {
+                                        reply += getPairsAsString(replica, null, null) + SEPARATOR;
+                                    }
+                                    reply += getPairsAsString(DBOpener.MAIN_TABLE, null, null);
+                                    streamWriter.println(reply);
+                                    break;
+
+                                case "@":
+                                    streamWriter.println(getPairsAsString(findTable(message[2]), null, null));
+                                    break;
+
+                                default:
+                                    streamWriter.println(getPairsAsString(findTable(message[2]), "key=?", new String[]{message[1]}));
+                                    break;
+
                             }
                             break;
 
